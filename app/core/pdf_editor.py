@@ -168,6 +168,14 @@ class PDFEditor:
                     obj.italic,
                 )
 
+                if obj.background_color is not None:
+                    page.draw_rect(
+                        rect,
+                        color=None,
+                        fill=obj.background_color,
+                        overlay=True,
+                    )
+
                 page.insert_textbox(
                     rect,
                     obj.text,

@@ -40,11 +40,14 @@ class EditorView(tk.Frame):
 
         self.drag_start = None
         self.object_start = None
+        self.drag_mode = None
+        self._interaction_snapshot = None
 
         self.history = []
         self.redo_stack = []
 
         self.text_color = "#101828"
+        self.text_background_color = (1.0, 0.95, 0.70)
 
         self.signature_path = None
 
@@ -341,20 +344,54 @@ class EditorView(tk.Frame):
             padx=16
         )
 
-        self.font_size_var = tk.IntVar(value=16)
+        self.font_size_var = tk.DoubleVar(value=16)
 
-        tk.Spinbox(
+        font_size_controls = tk.Frame(
             parent,
-            from_=6,
-            to=120,
-            textvariable=self.font_size_var,
-            width=8,
-            command=self.update_selected_text_style
-        ).pack(
+            bg=self.CARD
+        )
+
+        font_size_controls.pack(
             anchor="w",
             padx=16,
             pady=(4, 10)
         )
+
+        self._small_button(
+            font_size_controls,
+            "−",
+            self.decrease_selected_text_size
+        ).pack(side="left")
+
+        self.font_size_spinbox = tk.Spinbox(
+            font_size_controls,
+            from_=6,
+            to=120,
+            textvariable=self.font_size_var,
+            width=6,
+            command=self.update_selected_text_style
+        )
+
+        self.font_size_spinbox.pack(
+            side="left",
+            padx=5
+        )
+
+        self.font_size_spinbox.bind(
+            "<Return>",
+            lambda _: self.update_selected_text_style()
+        )
+
+        self.font_size_spinbox.bind(
+            "<FocusOut>",
+            lambda _: self.update_selected_text_style()
+        )
+
+        self._small_button(
+            font_size_controls,
+            "+",
+            self.increase_selected_text_size
+        ).pack(side="left")
 
         self.bold_var = tk.BooleanVar(value=False)
         self.italic_var = tk.BooleanVar(value=False)
@@ -389,6 +426,39 @@ class EditorView(tk.Frame):
             parent,
             "Text Color",
             self.choose_text_color
+        )
+
+        tk.Label(
+            parent,
+            text="Text Background",
+            font=("Segoe UI", 9),
+            fg=self.MUTED,
+            bg=self.CARD
+        ).pack(
+            anchor="w",
+            padx=16,
+            pady=(10, 0)
+        )
+
+        self.background_transparent_var = tk.BooleanVar(value=True)
+
+        tk.Checkbutton(
+            parent,
+            text="Transparent",
+            variable=self.background_transparent_var,
+            command=self.toggle_text_background,
+            bg=self.CARD,
+            fg=self.TEXT,
+            activebackground=self.CARD
+        ).pack(
+            anchor="w",
+            padx=12
+        )
+
+        self._button(
+            parent,
+            "Choose Background Color",
+            self.choose_text_background_color
         )
 
         # -----------------------------------------------------
@@ -543,7 +613,7 @@ class EditorView(tk.Frame):
 
         tk.Label(
             parent,
-            text="Tip: click an item in the preview to move or resize it.",
+            text="Tip: drag an item to move it, or drag its blue corner to resize it.",
             font=("Segoe UI", 8),
             fg=self.MUTED,
             bg=self.CARD,
@@ -1046,7 +1116,11 @@ class EditorView(tk.Frame):
 
             selected = obj is self.selected_object
 
-            fill = "#FFFFFF"
+            fill = (
+                ""
+                if obj.background_color is None
+                else self._rgb_to_hex(obj.background_color)
+            )
             outline = self.BLUE if selected else "#98A2B3"
 
             self.canvas.create_rectangle(
@@ -1073,7 +1147,7 @@ class EditorView(tk.Frame):
                 y1 + 5,
                 anchor="nw",
                 text=obj.text,
-                fill=self.text_color if selected else "#101828",
+                fill=self._rgb_to_hex(obj.color),
                 font=("Segoe UI", font_size, font_weight, font_slant),
                 width=max(
                     20,
@@ -1173,6 +1247,30 @@ class EditorView(tk.Frame):
             tags="resize_handle"
         )
 
+    @staticmethod
+    def _rgb_to_hex(color):
+        """Convert the PDF color tuple used by TextObject to a Tk color."""
+        channels = [
+            min(255, max(0, round(channel * 255)))
+            for channel in color
+        ]
+        return "#{:02x}{:02x}{:02x}".format(*channels)
+
+    def _is_on_resize_handle(self, x, y, obj):
+        """Return whether a canvas position is on an object's resize handle."""
+        if obj is None or obj.page_index != self.current_page:
+            return False
+
+        origin_x, origin_y = self.page_origin
+        handle_x = origin_x + (obj.x + obj.width) * self.preview_scale
+        handle_y = origin_y + (obj.y + obj.height) * self.preview_scale
+        hit_radius = 12
+
+        return (
+            abs(x - handle_x) <= hit_radius
+            and abs(y - handle_y) <= hit_radius
+        )
+
     # =========================================================
     # CANVAS INTERACTION
     # =========================================================
@@ -1221,10 +1319,18 @@ class EditorView(tk.Frame):
         x = self.canvas.canvasx(event.x)
         y = self.canvas.canvasy(event.y)
 
-        obj = self._find_object_at(
-            x,
-            y
-        )
+        # Check the selected object's corner first. The handle overlaps the
+        # object's bounding box, so regular hit testing would otherwise turn
+        # every attempted resize into a move.
+        if self._is_on_resize_handle(x, y, self.selected_object):
+            obj = self.selected_object
+            self.drag_mode = "resize"
+        else:
+            obj = self._find_object_at(
+                x,
+                y
+            )
+            self.drag_mode = "move" if obj else None
 
         if obj:
 
@@ -1249,8 +1355,11 @@ class EditorView(tk.Frame):
                 obj.x,
                 obj.y,
                 obj.width,
-                obj.height
+                obj.height,
+                getattr(obj, "font_size", None)
             )
+
+            self._interaction_snapshot = self._snapshot()
 
             self._render_page()
 
@@ -1258,6 +1367,8 @@ class EditorView(tk.Frame):
 
             self.selected_object = None
             self.selected_type = None
+            self.drag_mode = None
+            self._interaction_snapshot = None
             self._render_page()
 
     def on_canvas_drag(self, event):
@@ -1279,19 +1390,67 @@ class EditorView(tk.Frame):
             y - self.drag_start[1]
         ) / self.preview_scale
 
-        obj = self.selected_object
+        if self.drag_mode == "resize":
+            self._resize_selected_object(dx, dy)
+        else:
+            obj = self.selected_object
+            page = self.editor.get_page(self.current_page)
 
-        obj.x = max(
-            0,
-            self.object_start[0] + dx
-        )
+            obj.x = min(
+                max(0, self.object_start[0] + dx),
+                max(0, page.rect.width - obj.width)
+            )
 
-        obj.y = max(
-            0,
-            self.object_start[1] + dy
-        )
+            obj.y = min(
+                max(0, self.object_start[1] + dy),
+                max(0, page.rect.height - obj.height)
+            )
 
         self._render_page()
+
+    def _resize_selected_object(self, dx, dy):
+        """Resize from the bottom-right corner while preserving proportions."""
+        obj = self.selected_object
+        if obj is None or not self.object_start:
+            return
+
+        start_x, start_y, start_width, start_height, start_font_size = (
+            self.object_start
+        )
+
+        # Project the pointer movement onto the object's diagonal. This makes
+        # horizontal, vertical, and diagonal drags all feel predictable while
+        # retaining the object's aspect ratio.
+        diagonal_squared = start_width ** 2 + start_height ** 2
+        if diagonal_squared <= 0:
+            return
+
+        scale = 1 + (
+            dx * start_width + dy * start_height
+        ) / diagonal_squared
+
+        min_scale = max(
+            24 / start_width,
+            18 / start_height
+        )
+
+        if isinstance(obj, TextObject) and start_font_size:
+            min_scale = max(min_scale, 6 / start_font_size)
+
+        page = self.editor.get_page(self.current_page)
+        max_scale = min(
+            (page.rect.width - start_x) / start_width,
+            (page.rect.height - start_y) / start_height
+        )
+
+        scale = min(max(scale, min_scale), max_scale)
+
+        obj.width = start_width * scale
+        obj.height = start_height * scale
+
+        if isinstance(obj, TextObject) and start_font_size:
+            obj.font_size = min(120, max(6, start_font_size * scale))
+            self.font_size_var.set(round(obj.font_size, 1))
 
     def on_canvas_release(self, event):
 
@@ -1306,12 +1465,16 @@ class EditorView(tk.Frame):
                 self.selected_object.height
             )
 
-            if old != new:
-
-                self._push_history()
+            if old[:4] != new and self._interaction_snapshot is not None:
+                self.history.append(self._interaction_snapshot)
+                if len(self.history) > 50:
+                    self.history.pop(0)
+                self.redo_stack.clear()
 
         self.drag_start = None
         self.object_start = None
+        self.drag_mode = None
+        self._interaction_snapshot = None
 
     def on_canvas_double_click(self, event):
 
@@ -1415,6 +1578,13 @@ class EditorView(tk.Frame):
             obj.italic
         )
 
+        self.background_transparent_var.set(
+            obj.background_color is None
+        )
+
+        if obj.background_color is not None:
+            self.text_background_color = obj.background_color
+
         if obj.align == 0:
             self.align_var.set("Left")
         elif obj.align == 1:
@@ -1449,10 +1619,14 @@ class EditorView(tk.Frame):
 
         obj = self.selected_object
 
-        obj.font_size = max(
-            6,
-            int(self.font_size_var.get())
-        )
+        try:
+            font_size = float(self.font_size_var.get())
+        except (ValueError, tk.TclError):
+            self.font_size_var.set(round(obj.font_size, 1))
+            return
+
+        obj.font_size = min(120, max(6, font_size))
+        self.font_size_var.set(round(obj.font_size, 1))
 
         obj.bold = self.bold_var.get()
         obj.italic = self.italic_var.get()
@@ -1467,6 +1641,21 @@ class EditorView(tk.Frame):
             obj.align = 2
 
         self._render_page()
+
+    def decrease_selected_text_size(self):
+        self._adjust_selected_text_size(-1)
+
+    def increase_selected_text_size(self):
+        self._adjust_selected_text_size(1)
+
+    def _adjust_selected_text_size(self, amount):
+        if not isinstance(self.selected_object, TextObject):
+            return
+
+        self.font_size_var.set(
+            min(120, max(6, self.selected_object.font_size + amount))
+        )
+        self.update_selected_text_style()
 
     def choose_text_color(self):
 
@@ -1491,6 +1680,43 @@ class EditorView(tk.Frame):
                 rgb[2] / 255,
             )
 
+        self._render_page()
+
+    def toggle_text_background(self):
+        if not isinstance(self.selected_object, TextObject):
+            return
+
+        if self.background_transparent_var.get():
+            self.selected_object.background_color = None
+        else:
+            self.selected_object.background_color = self.text_background_color
+
+        self._render_page()
+
+    def choose_text_background_color(self):
+        if not isinstance(self.selected_object, TextObject):
+            messagebox.showinfo(
+                "Text Background",
+                "Select a text object first."
+            )
+            return
+
+        result = colorchooser.askcolor(
+            color=self._rgb_to_hex(self.text_background_color),
+            title="Choose Text Background Color"
+        )
+
+        if not result or not result[1]:
+            return
+
+        rgb = result[0]
+        self.text_background_color = (
+            rgb[0] / 255,
+            rgb[1] / 255,
+            rgb[2] / 255,
+        )
+        self.selected_object.background_color = self.text_background_color
+        self.background_transparent_var.set(False)
         self._render_page()
 
     # =========================================================

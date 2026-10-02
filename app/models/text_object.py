@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -22,6 +22,8 @@ class TextObject:
     bold: bool = False
     italic: bool = False
 
+    background_color: Optional[Tuple[float, float, float]] = None
+
     @property
     def rect(self):
         return (
@@ -41,6 +43,7 @@ class TextObject:
             font_name=self.font_name,
             font_size=self.font_size,
             color=self.color,
+            background_color=self.background_color,
             align=self.align,
             page_index=self.page_index,
             bold=self.bold,
